@@ -1,0 +1,110 @@
+import org.opencv.core.*;
+import org.opencv.dnn.*;
+import org.opencv.imgproc.*;
+import org.opencv.videoio.*;
+import org.opencv.highgui.*;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+import java.io.File;
+
+public class GameTrackerAI {
+    static { System.loadLibrary(Core.NATIVE_LIBRARY_NAME); }
+
+    public static void main(String[] args) {
+        // Paths to YOLO files
+        String modelConfiguration = "yolov4.cfg";  // YOLO configuration file
+        String modelWeights = "yolov4.weights";    // YOLO weights file
+        String classNamesFile = "coco.names";      // Class labels file (update for 2025 game)
+
+        // Load YOLO model
+        Net net = Dnn.readNetFromDarknet(modelConfiguration, modelWeights);
+        net.setPreferableBackend(Dnn.DNN_BACKEND_OPENCV);
+        net.setPreferableTarget(Dnn.DNN_TARGET_CPU);
+
+        // Load class names
+        List<String> classNames = new ArrayList<>();
+        try (Scanner scanner = new Scanner(new File(classNamesFile))) {
+            while (scanner.hasNextLine()) {
+                classNames.add(scanner.nextLine());
+            }
+        } catch (Exception e) {
+            System.err.println("Error loading class names: " + e.getMessage());
+            return;
+        }
+
+        // Video input (replace with live camera feed or video file)
+        String videoPath = "match_video.mp4"; // Update with your video feed
+        VideoCapture cap = new VideoCapture(videoPath);
+
+        if (!cap.isOpened()) {
+            System.err.println("Error: Cannot open video file!");
+            return;
+        }
+
+        Mat frame = new Mat();
+        while (cap.read(frame)) {
+            // Prepare input blob for YOLO
+            Mat blob = Dnn.blobFromImage(frame, 1 / 255.0, new Size(416, 416), new Scalar(0, 0, 0), true, false);
+            net.setInput(blob);
+
+            // Perform forward pass
+            List<Mat> results = new ArrayList<>();
+            List<String> outLayerNames = net.getUnconnectedOutLayersNames();
+            net.forward(results, outLayerNames);
+
+            // Process detections
+            float confThreshold = 0.5f;  // Confidence threshold
+            float nmsThreshold = 0.4f;  // Non-max suppression threshold
+            List<Rect2d> boxes = new ArrayList<>();
+            List<Float> confidences = new ArrayList<>();
+            List<Integer> classIds = new ArrayList<>();
+
+            for (Mat result : results) {
+                for (int i = 0; i < result.rows(); i++) {
+                    Mat row = result.row(i);
+                    Mat scores = row.colRange(5, row.cols());
+                    Core.MinMaxLocResult mm = Core.minMaxLoc(scores);
+
+                    float confidence = (float) mm.maxVal;
+                    if (confidence > confThreshold) {
+                        int centerX = (int) (row.get(0, 0)[0] * frame.cols());
+                        int centerY = (int) (row.get(0, 1)[0] * frame.rows());
+                        int width = (int) (row.get(0, 2)[0] * frame.cols());
+                        int height = (int) (row.get(0, 3)[0] * frame.rows());
+
+                        int left = centerX - width / 2;
+                        int top = centerY - height / 2;
+                        boxes.add(new Rect2d(left, top, width, height));
+                        confidences.add(confidence);
+                        classIds.add((int) mm.maxLoc.x);
+                    }
+                }
+            }
+
+            // Apply Non-Max Suppression
+            MatOfFloat confidencesMat = new MatOfFloat(Converters.vector_float_to_Mat(confidences));
+            MatOfRect2d boxesMat = new MatOfRect2d(boxes.toArray(new Rect2d[0]));
+            MatOfInt indices = new MatOfInt();
+            Dnn.NMSBoxes(boxesMat, confidencesMat, confThreshold, nmsThreshold, indices);
+
+            // Draw detections
+            for (int idx : indices.toArray()) {
+                Rect2d box = boxes.get(idx);
+                int classId = classIds.get(idx);
+                String label = classNames.get(classId) + String.format(" (%.2f)", confidences.get(idx));
+
+                Imgproc.rectangle(frame, box.tl(), box.br(), new Scalar(0, 255, 0), 2);
+                Imgproc.putText(frame, label, new Point(box.x, box.y - 5), Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, new Scalar(255, 255, 255), 1);
+            }
+
+            // Display the frame
+            HighGui.imshow("Game Tracker AI", frame);
+            if (HighGui.waitKey(1) == 'q') break;
+        }
+
+        cap.release();
+        HighGui.destroyAllWindows();
+    }
+}
